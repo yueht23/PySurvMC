@@ -36,16 +36,10 @@ class ProportionalHazard():
         self.ub = ub
         self.event = event
         self.covariates = covariates
-
-        # check the priors, whether the all priors are given or not
-        assert "coeff" in priors, "The prior of the coefficients is not given"
-
         self.coefficients = priors["coeff"]
 
-        # initialize the scale parameter by propotionality assumption
-        self.scale = pm.math.exp(-pm.math.dot(self.covariates, self.coefficients))
-
         # need to initialize by the child class
+        self.scale = None
         self.shape = None
         self.rv = None
 
@@ -72,7 +66,7 @@ class ProportionalHazard():
         llk += (event == 2) * (pm.logcdf(rv, ub) - pm.logcdf(rv, lb))
         return llk
 
-    def fit(self, draw=1000, tune=100, chains=4, cores=4, nuts_sampler="nutpie"):
+    def fit(self, draws=1000, tune=100, chains=4, cores=4, nuts_sampler="nutpie", **kwargs):
         """
         Fit the data to Weibull distribution using MLE method.
 
@@ -82,22 +76,37 @@ class ProportionalHazard():
             The trace of the fitted Distribution.
         """
 
-        with pm.Model() as model:
+        with pm.Model() as self.model:
             # register the priors
-            model.register_rv(self.coefficients, name="coeff")
-            model.register_rv(self.shape, name="shape")
+            self.model.register_rv(self.coefficients, name="coeff")
+            self.model.register_rv(self.shape, name="shape")
+            self.model.register_rv(self.scale, name="scale")
 
             # define the likelihood
-            pm.Potential("llk", self._logp(self.lb, self.ub, self.event, self.rv))
+            pm.Potential("logPdf", self._logp(self.lb, self.ub, self.event, self.rv))
 
             # sampling
-            self.trace = pm.sample(draws=draw, tune=tune, chains=chains, cores=cores, nuts_sampler=nuts_sampler)
+            self.trace = pm.sample(draws=draws,
+                                   tune=tune,
+                                   chains=chains,
+                                   cores=cores,
+                                   nuts_sampler=nuts_sampler, **kwargs)
 
-    def summary(self):
+    def predict(self, covariates):
+        """
+        Predict the survival time of the given covariates.
+        :param
+            covariates: array-like
+        :return:
+            The predicted survival time.
+        """
+        raise NotImplementedError("The predict function is not implemented by the child class")
+
+    def summary(self, **kwargs):
         """
         Print the summary of the fitted Weibull distribution.
         """
-        summary = pd.DataFrame(az.summary(self.trace, round_to=3, kind="stats", hdi_prob=0.95))
+        summary = pd.DataFrame(az.summary(self.trace, round_to=3, kind="stats", hdi_prob=0.95, **kwargs))
         return summary.rename(columns={"hdi_2.5%": "BCI_lb", "hdi_97.5%": "BCI_ub"})
 
     def plot_trace(self, **kwargs):
@@ -106,74 +115,35 @@ class ProportionalHazard():
         """
         return az.plot_trace(self.trace, **kwargs)
 
+    def plot_posterior(self, **kwargs):
+        """
+        Plot the posterior of the fitted Weibull distribution.
+        """
+        return az.plot_posterior(self.trace, **kwargs)
+
     def plot_hazard(self):
         """
         Plot the hazard function of the fitted Weibull distribution.
         """
-        pass
+        raise NotImplementedError("The hazard function is not implemented by the child class")
 
     def plot_survival(self):
         """
         Plot the survival function of the fitted Weibull distribution.
         """
-        pass
+        raise NotImplementedError("The survival function is not implemented by the child class")
 
     def propotionality_test(self):
         """
         Perform the propotionality test of the covariates.
         """
-        pass
+        raise NotImplementedError("The propotionality test is not implemented by the child class")
 
-
-class ExponentialPH(ProportionalHazard):
-    """
-    ExponentialPH class is used to fit the survival data to the exponential distribution,
-    while the Left , interval and right censored data are considered by using the MCMC method.
-    """
-
-    def __init__(self, lb, ub, event, covariates, priors):
+    def visualize_model(self, **kwargs):
         """
-        Initialize the ExperimentalPH class with the data.
-
-        Parameters
-        ----------
-        lb : array-like
-            The left bound of the Time-to-Event data
-        ub : array-like
-            The right bound of the Time-to-Event data
-        event : array-like
-            The event indicator of the Time-to-Event data
-            -1: Left censored
-            0: fully observed
-            1: Right censored
-            2: Interval censored
-        covariates : array-like
-        priors : dict
+        Visualize the model structure.
         """
-
-        super().__init__(lb, ub, event, covariates, priors)
-        self.scale = 1 / self.scale
-        self.rv = pm.Exponential.dist(self.scale)
-
-    def fit(self, draw=1000, tune=100, chains=4, cores=4, nuts_sampler="nutpie"):
-        """
-        Fit the data to Weibull distribution using MLE method.
-
-        Returns
-        -------
-        trace : pymc3.MultiTrace
-            The trace of the fitted Distribution.
-        """
-
-        with pm.Model() as model:
-            # register the priors
-            model.register_rv(self.coefficients, name="coeff")
-
-            # define the likelihood
-            pm.Potential("llk", self._logp(self.lb, self.ub, self.event, self.rv))
-
-            # sampling
-            self.trace = pm.sample(draws=draw, tune=tune, chains=chains, cores=cores, nuts_sampler=nuts_sampler)
+        return pm.model_to_graphviz(self.model, **kwargs)
 
 
 class WeibullPH(ProportionalHazard):
@@ -203,21 +173,22 @@ class WeibullPH(ProportionalHazard):
         """
 
         super().__init__(lb, ub, event, covariates, priors)
-
-        assert "shape" in priors, "shape prior is not given"
         self.shape = priors["shape"]
-        self.rv = pm.Weibull.dist(self.shape, self.scale)
+        self.scale = priors["scale"]
+
+        self.rv = pm.Weibull.dist(
+            self.shape, self.scale * pm.math.exp(-pm.math.dot(self.covariates, self.coefficients)) ** (1 / self.shape))
 
 
-class GumbelPH(ProportionalHazard):
+class ExponentialPH(ProportionalHazard):
     """
-    GumbelPH class is used to fit the survival data to the Gumbel distribution,
+    ExponentialPH class is used to fit the survival data to the Exponential distribution,
     while the Left , interval and right censored data are considered by using the MCMC method.
     """
 
     def __init__(self, lb, ub, event, covariates, priors):
         """
-        Initialize the GumbelPH class with the data.
+        Initialize the ExponentialPH class with the data.
 
         Parameters
         ----------
@@ -236,22 +207,23 @@ class GumbelPH(ProportionalHazard):
         """
 
         super().__init__(lb, ub, event, covariates, priors)
+        self.scale = priors["scale"]
 
-        # check if the shape prior is given
-        assert "shape" in priors, "shape prior is not given"
-        self.shape = priors["shape"]
-        self.rv = pm.Gumbel.dist(mu=self.scale, beta=self.shape)
+        assert "shape" not in priors, "The Exponential distribution does not have the shape parameter."
+
+        self.rv = pm.Exponential.dist(
+            self.scale * pm.math.exp(-pm.math.dot(self.covariates, self.coefficients)))
 
 
-class GammaPH(ProportionalHazard):
+class LogNormalPH(ProportionalHazard):
     """
-    GammaPH class is used to fit the survival data to the Gamma distribution,
+    LogNormalPH class is used to fit the survival data to the LogNormal distribution,
     while the Left , interval and right censored data are considered by using the MCMC method.
     """
 
     def __init__(self, lb, ub, event, covariates, priors):
         """
-        Initialize the GammaPH class with the data.
+        Initialize the LogNormalPH class with the data.
 
         Parameters
         ----------
@@ -270,49 +242,22 @@ class GammaPH(ProportionalHazard):
         """
 
         super().__init__(lb, ub, event, covariates, priors)
-
-        # check if there has the censoring data, as the Gamma distribution is not suitable for the censored data
-        if np.any(event != 0):
-            warnings.warn("The Gamma distribution is not suitable for the censored data, "
-                          "the censored data will be treated as fully observed data.")
-            self.event = np.zeros_like(self.event)
-
-        # check if the shape prior is given
-        assert "shape" in priors, "shape prior is not given"
+        self.scale = priors["scale"]
         self.shape = priors["shape"]
-        self.rv = pm.Gamma.dist(alpha=self.shape, beta=1 / self.scale)
 
-    def _logp(self, lb, ub, event, rv):
-        """
-        The log likelihood function of the Generalized Proportional Hazard model.
-        :parameter
-        lb : array-like
-            The left bound of the Time-to-Event data
-        ub : array-like
-            The right bound of the Time-to-Event data
-        event : array-like
-            The event indicator of the Time-to-Event data
-            -1: Left censored
-            0: fully observed
-            1: Right censored
-            2: Interval censored
-        rv : PyMC3 distribution
-            The random variable of the distribution
-        """
-
-        llk = (event == 0) * pm.logp(rv, lb)
-        return llk
+        self.rv = pm.Lognormal.dist(
+            self.scale * pm.math.exp(-pm.math.dot(self.covariates, self.coefficients)), self.shape)
 
 
-class GompertzPH(ProportionalHazard):
+class LogLogisticPH(ProportionalHazard):
     """
-    GompertzPH class is used to fit the survival data to the Gompertz distribution,
+    LogLogisticPH class is used to fit the survival data to the LogLogistic distribution,
     while the Left , interval and right censored data are considered by using the MCMC method.
     """
 
     def __init__(self, lb, ub, event, covariates, priors):
         """
-        Initialize the GompertzPH class with the data.
+        Initialize the LogLogisticPH class with the data.
 
         Parameters
         ----------
@@ -331,42 +276,8 @@ class GompertzPH(ProportionalHazard):
         """
 
         super().__init__(lb, ub, event, covariates, priors)
-
-        # check if the shape prior is given
-        assert "shape" in priors, "shape prior is not given"
+        self.scale = priors["scale"]
         self.shape = priors["shape"]
 
-    def _logp(self, lb, ub, event, rv):
-        """
-        The log likelihood function of the Generalized Proportional Hazard model.
-        :parameter
-        lb : array-like
-            The left bound of the Time-to-Event data
-        ub : array-like
-            The right bound of the Time-to-Event data
-        event : array-like
-            The event indicator of the Time-to-Event data
-            -1: Left censored
-            0: fully observed
-            1: Right censored
-            2: Interval censored
-        rv : PyMC3 distribution
-            The random variable of the distribution
-        """
-        # PyMC has not implemented the Gompertz distribution
-        # so we need to implement the log likelihood function manually
-        assert self.rv is None
-
-        def gompertz_logp(x, shape, scale):
-            return pm.math.log(scale) + pm.math.log(shape) + shape + scale * x - pm.math.exp(scale * x) * shape
-
-        def gompertz_logcdf(x, shape, scale):
-            return pm.math.log(1 - pm.math.exp(- shape * (pm.math.exp(scale * x) - 1)))
-
-        llk = (event == -1) * gompertz_logcdf(ub, self.shape, self.scale)
-        llk += (event == 0) * gompertz_logp(lb, self.shape, self.scale)
-        llk += (event == 1) * (1 - gompertz_logcdf(lb, self.shape, self.scale))
-        llk += (event == 2) * (gompertz_logcdf(ub, self.shape, self.scale) -
-                               gompertz_logcdf(lb, self.shape, self.scale))
-
-        return llk
+        self.rv = pm.Lognormal.dist(
+            self.scale * pm.math.exp(-pm.math.dot(self.covariates, self.coefficients)), self.shape)
